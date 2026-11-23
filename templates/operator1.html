@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Operator 1 — HackRF CSI & Pemandu Napas</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0d1117;
+      color: #e6edf3;
+      max-width: 1200px;
+      margin: 1.5rem auto;
+      padding: 0 1rem;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+
+    .flex-row {
+      display: flex;
+      gap: 1rem;
+    }
+
+    .flex-row>div {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-bottom: 0.35rem;
+    }
+
+    input {
+      width: 100%;
+      height: 2.6rem;
+      padding: 0 0.75rem;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-family: inherit;
+      font-size: 1rem;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    button {
+      flex: 1;
+      height: 2.75rem;
+      padding: 0 1.2rem;
+      border: none;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: #238636;
+      color: #fff;
+    }
+
+    .btn-secondary {
+      background: #1f6feb;
+      color: #fff;
+    }
+
+    .btn-danger {
+      background: #da3633;
+      color: #fff;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.3rem 0.75rem;
+      border-radius: 999px;
+      font-weight: bold;
+      font-size: 0.9rem;
+    }
+
+    .IDLE {
+      background: #30363d;
+      color: #c9d1d9;
+    }
+
+    .SCHEDULED {
+      background: #9e6a03;
+      color: #fff;
+    }
+
+    .RUNNING {
+      background: #238636;
+      color: #fff;
+    }
+
+    .EXTRACTING {
+      background: #8957e5;
+      color: #fff;
+    }
+
+    .error {
+      color: #ff7b72;
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    .note {
+      color: #58a6ff;
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    /* Modal Setting Napas */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(1, 4, 9, 0.8);
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 520px;
+    }
+
+    /* Visual Running Mode (2 Kolom Bersih) */
+    #runningView {
+      display: none;
+    }
+
+    .running-grid {
+      display: flex;
+      gap: 1rem;
+      min-height: 76vh;
+    }
+
+    .left-panel,
+    .right-panel {
+      flex: 1;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .left-panel {
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    .circle-stage {
+      width: 320px;
+      height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    .breath-circle {
+      width: 170px;
+      height: 170px;
+      border-radius: 50%;
+      background: #21262d;
+      border: 4px solid #30363d;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+      will-change: transform;
+    }
+
+    .breath-circle.knock-pulse {
+      background: #484f58 !important;
+      border-color: #8b949e !important;
+      box-shadow: 0 0 36px rgba(139, 148, 158, 0.55);
+    }
+
+    .breath-circle.TARIK_NAFAS {
+      border-color: #3fb950;
+      background: rgba(46, 160, 67, 0.22);
+    }
+
+    .breath-circle.TAHAN_1,
+    .breath-circle.TAHAN_2 {
+      border-color: #d29922;
+      background: rgba(210, 153, 34, 0.18);
+    }
+
+    .breath-circle.HEMBUS_NAFAS {
+      border-color: #58a6ff;
+      background: rgba(31, 111, 235, 0.22);
+    }
+
+    .circle-timer {
+      font-size: 2.6rem;
+      font-weight: bold;
+      color: #f0f6fc;
+      line-height: 1;
+    }
+
+    .circle-sub {
+      font-size: 0.75rem;
+      color: #8b949e;
+      margin-top: 0.35rem;
+    }
+
+    .phase-title {
+      font-size: 1.7rem;
+      font-weight: bold;
+      margin-top: 1.5rem;
+      letter-spacing: 0.05em;
+    }
+
+    canvas.csi-canvas {
+      width: 100%;
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 8px;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Header Atas (Selalu Tampil) -->
+  <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
+    <div>
+      <div style="font-size:0.8rem; color:#8b949e;">OPERATOR 1 — HACKRF CSI & PEMANDU NAPAS</div>
+      <div id="liveClock" style="font-size:1.6rem; font-weight:bold;">--:--:--</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.75rem;">
+      <span id="countdownPill" style="color:#e3b341; font-weight:bold;"></span>
+      <span id="stateBadge" class="badge IDLE">IDLE</span>
+      <button id="topStopBtn" class="btn-danger" style="display:none; width:auto; flex:none;"
+        onclick="stopSession()">Stop Sesi</button>
+    </div>
+  </div>
+
+  <!-- Tampilan Setup Awal -->
+  <div id="setupView" class="card">
+    <div class="flex-row">
+      <div>
+        <label for="subjectTag">Kode Subjek / Sesi (Tersimpan Lokal)</label>
+        <input id="subjectTag" type="text" placeholder="P1_sesi1" />
+      </div>
+      <div>
+        <label for="startTime">Waktu Mulai (HH:MM:SS)</label>
+        <input id="startTime" type="time" step="1" />
+      </div>
+      <div>
+        <label for="freqMhz">Frekuensi Ch 6 (MHz)</label>
+        <input id="freqMhz" type="number" step="1" />
+      </div>
+      <div>
+        <label for="lnaGain">LNA Gain (dB)</label>
+        <input id="lnaGain" type="number" step="8" min="0" max="40" />
+      </div>
+      <div>
+        <label for="vgaGain">VGA Gain (dB)</label>
+        <input id="vgaGain" type="number" step="2" min="0" max="62" />
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="openBreathModal()">Setting Napas</button>
+      <button class="btn-primary" onclick="submitSchedule()">Jadwalkan Start</button>
+      <button class="btn-danger" onclick="stopSession()">Batalkan Jadwal</button>
+    </div>
+
+    <div id="breathSummary" style="margin-top:0.85rem; font-size:0.85rem; color:#8b949e;"></div>
+    <div id="errorBox" class="error"></div>
+    <div id="noteBox" class="note"></div>
+  </div>
+
+  <!-- Modal Setting Siklus Napas -->
+  <div id="breathModal" class="modal-backdrop">
+    <div class="modal-box">
+      <h3 style="margin-top:0;">Setting Siklus Napas (Detik)</h3>
+      <div class="flex-row" style="margin-bottom:0.85rem;">
+        <div>
+          <label for="durInhale">Tarik Nafas (dtk)</label>
+          <input id="durInhale" type="number" step="0.5" min="1" />
+        </div>
+        <div>
+          <label for="durHold1">Tahan Setelah Tarik (dtk)</label>
+          <input id="durHold1" type="number" step="0.5" min="0" />
+        </div>
+      </div>
+      <div class="flex-row">
+        <div>
+          <label for="durExhale">Hembus Nafas (dtk)</label>
+          <input id="durExhale" type="number" step="0.5" min="1" />
+        </div>
+        <div>
+          <label for="durHold2">Tahan Setelah Hembus (dtk)</label>
+          <input id="durHold2" type="number" step="0.5" min="0" />
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:1.25rem;">
+        <button class="btn-primary" onclick="saveBreathSettings()">Simpan Pengaturan</button>
+        <button class="btn-danger" onclick="closeBreathModal()">Tutup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tampilan Running Bersih (2 Kolom: Kiri & Kanan) -->
+  <div id="runningView" class="running-grid">
+    <div class="left-panel">
+      <div class="circle-stage">
+        <div id="breathCircle" class="breath-circle">
+          <div id="circleTimer" class="circle-timer">0.0</div>
+          <div class="circle-sub">detik berikutnya</div>
+        </div>
+      </div>
+      <div id="phaseTitle" class="phase-title">BERSIAP</div>
+      <div id="cycleInfo" style="color:#8b949e; margin-top:0.4rem; font-size:0.9rem;">Siklus #0</div>
+    </div>
+
+    <div class="right-panel">
+      <div style="display:flex; justify-content:space-between; font-size:0.85rem; color:#8b949e;">
+        <span>PROFIL INSTAN 52 SUBCARRIER (-26 .. +26)</span>
+        <span id="rfMetrics">Paket: 0 | rho: - | CFO: -</span>
+      </div>
+      <div style="font-size:0.8rem; color:#3fb950; margin-top:0.6rem;">Amplitudo |H[k]|</div>
+      <canvas id="ampCanvas" class="csi-canvas"></canvas>
+      <div style="font-size:0.8rem; color:#58a6ff; margin-top:0.75rem;">Fase Tersanitasi arg H[k] (rad)</div>
+      <canvas id="phaseCanvas" class="csi-canvas"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "csi_op1_settings_v1";
+    const defaultSettings = {
+      subjectTag: "P1_sesi1",
+      freqMhz: 2437,
+      lnaGain: 40,
+      vgaGain: 26,
+      inhale: 4.0,
+      hold1: 4.0,
+      exhale: 4.0,
+      hold2: 4.0,
+    };
+
+    function loadSettings() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? { ...defaultSettings, ...JSON.parse(raw) } : { ...defaultSettings };
+      } catch {
+        return { ...defaultSettings };
+      }
+    }
+
+    function persistSettings(cfg) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+      updateBreathSummary(cfg);
+    }
+
+    function updateBreathSummary(cfg) {
+      document.getElementById("breathSummary").textContent =
+        `Siklus Napas Tersimpan: Tarik ${cfg.inhale}s -> Tahan ${cfg.hold1}s -> Hembus ${cfg.exhale}s -> Tahan ${cfg.hold2}s`;
+    }
+
+    let settings = loadSettings();
+    document.getElementById("subjectTag").value = settings.subjectTag;
+    document.getElementById("freqMhz").value = settings.freqMhz;
+    document.getElementById("lnaGain").value = settings.lnaGain;
+    document.getElementById("vgaGain").value = settings.vgaGain;
+    updateBreathSummary(settings);
+
+    const initTime = new Date(Date.now() + 25000);
+    document.getElementById("startTime").value = initTime.toTimeString().slice(0, 8);
+
+    function openBreathModal() {
+      settings = loadSettings();
+      document.getElementById("durInhale").value = settings.inhale;
+      document.getElementById("durHold1").value = settings.hold1;
+      document.getElementById("durExhale").value = settings.exhale;
+      document.getElementById("durHold2").value = settings.hold2;
+      document.getElementById("breathModal").classList.add("open");
+    }
+
+    function closeBreathModal() {
+      document.getElementById("breathModal").classList.remove("open");
+    }
+
+    function saveBreathSettings() {
+      settings.inhale = Math.max(1, Number(document.getElementById("durInhale").value) || 4);
+      settings.hold1 = Math.max(0, Number(document.getElementById("durHold1").value) || 0);
+      settings.exhale = Math.max(1, Number(document.getElementById("durExhale").value) || 4);
+      settings.hold2 = Math.max(0, Number(document.getElementById("durHold2").value) || 0);
+      persistSettings(settings);
+      closeBreathModal();
+    }
+
+    // --- Web Audio API Synthesizer ---
+    let audioCtx = null;
+    let activeSweepOsc = null;
+    let activeSweepGain = null;
+
+    function ensureAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+      }
+    }
+
+    function stopContinuousSweep() {
+      if (activeSweepOsc) {
+        try {
+          activeSweepOsc.stop();
+          activeSweepOsc.disconnect();
+        } catch { }
+        activeSweepOsc = null;
+      }
+      if (activeSweepGain) {
+        try { activeSweepGain.disconnect(); } catch { }
+        activeSweepGain = null;
+      }
+    }
+
+    function playKnockSound() {
+      ensureAudio();
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(780, now);
+      osc.frequency.exponentialRampToValueAtTime(220, now + 0.08);
+
+      gain.gain.setValueAtTime(0.35, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.095);
+    }
+
+    function startPhaseSweep(direction, durationSec) {
+      ensureAudio();
+      stopContinuousSweep();
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+
+      osc.type = "sine";
+      if (direction === "UP") {
+        osc.frequency.setValueAtTime(210, now);
+        osc.frequency.linearRampToValueAtTime(520, now + durationSec);
+      } else {
+        osc.frequency.setValueAtTime(520, now);
+        osc.frequency.linearRampToValueAtTime(210, now + durationSec);
+      }
+
+      gain.gain.setValueAtTime(0.01, now);
+      gain.gain.linearRampToValueAtTime(0.18, now + 0.12);
+      gain.gain.setValueAtTime(0.18, Math.max(now + 0.12, now + durationSec - 0.12));
+      gain.gain.linearRampToValueAtTime(0.001, now + durationSec);
+
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + durationSec);
+      activeSweepOsc = osc;
+      activeSweepGain = gain;
+    }
+
+    // --- Visual Pulse & Canvas Plotting ---
+    let lastKnockId = 0;
+    let lastPhaseKey = "";
+    let knockPulseTimeout = null;
+
+    function triggerGrayKnockPulse() {
+      const circle = document.getElementById("breathCircle");
+      circle.classList.add("knock-pulse");
+      clearTimeout(knockPulseTimeout);
+      knockPulseTimeout = setTimeout(() => {
+        circle.classList.remove("knock-pulse");
+      }, 160);
+    }
+
+    function drawSubcarrierPlot(canvasId, subcarriers, values, color, minY, maxY) {
+      const canvas = document.getElementById(canvasId);
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      canvas.width = rect.width * devicePixelRatio;
+      canvas.height = rect.height * devicePixelRatio;
+
+      const ctx = canvas.getContext("2d");
+      ctx.scale(devicePixelRatio, devicePixelRatio);
+      const w = rect.width;
+      const h = rect.height;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid horizontal
+      ctx.strokeStyle = "#21262d";
+      ctx.lineWidth = 1;
+      for (let g = 1; g <= 3; g++) {
+        const y = (h * g) / 4;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+
+      if (!values || values.length === 0) {
+        ctx.fillStyle = "#484f58";
+        ctx.font = "12px monospace";
+        ctx.fillText("Menunggu paket OFDM L-LTF (rho > 0.6)...", 14, h / 2);
+        return;
+      }
+
+      const lo = minY !== null ? minY : Math.min(...values) * 0.9;
+      const hi = maxY !== null ? maxY : Math.max(...values) * 1.1 || 1;
+      const span = hi - lo || 1;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      values.forEach((v, idx) => {
+        const x = 12 + (idx / Math.max(1, values.length - 1)) * (w - 24);
+        const norm = (v - lo) / span;
+        const y = h - 12 - norm * (h - 24);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type !== "STATE") return;
+
+      document.getElementById("liveClock").textContent = data.now_str;
+
+      const badge = document.getElementById("stateBadge");
+      badge.textContent = data.state;
+      badge.className = `badge ${data.state}`;
+
+      const isRunning = data.state === "RUNNING";
+      document.getElementById("setupView").style.display = isRunning ? "none" : "block";
+      document.getElementById("runningView").style.display = isRunning ? "flex" : "none";
+      document.getElementById("topStopBtn").style.display = isRunning ? "inline-block" : "none";
+
+      const cdPill = document.getElementById("countdownPill");
+      if (data.state === "SCHEDULED" && data.countdown_start_sec !== null) {
+        cdPill.textContent = `Mulai dalam ${data.countdown_start_sec.toFixed(1)} dtk`;
+      } else if (isRunning && data.elapsed_sec !== null) {
+        cdPill.textContent = `Rekaman: ${data.elapsed_sec.toFixed(1)} dtk`;
+      } else {
+        cdPill.textContent = "";
+      }
+
+      document.getElementById("errorBox").textContent = data.error_message || data.hackrf.last_error || "";
+      document.getElementById("noteBox").textContent = data.status_note || "";
+
+      // Deteksi ketukan baru (termasuk 3 ketukan pra-start sebelum T=0)
+      if (data.breath.knock_event_id !== lastKnockId) {
+        lastKnockId = data.breath.knock_event_id;
+        playKnockSound();
+        if (isRunning) triggerGrayKnockPulse();
+      }
+
+      if (!isRunning) {
+        if (lastPhaseKey !== "") {
+          lastPhaseKey = "";
+          stopContinuousSweep();
+        }
+        return;
+      }
+
+      // Update panel kiri (Lingkaran Napas & Timer)
+      const phase = data.breath.phase;
+      const cycle = data.breath.cycle;
+      const rem = data.breath.remaining_sec;
+      const prog = data.breath.progress;
+      const durs = data.breath.durations;
+
+      const phaseKey = `${cycle}_${phase}`;
+      if (phaseKey !== lastPhaseKey) {
+        lastPhaseKey = phaseKey;
+        if (phase === "TARIK_NAFAS") {
+          startPhaseSweep("UP", durs.inhale);
+        } else if (phase === "HEMBUS_NAFAS") {
+          startPhaseSweep("DOWN", durs.exhale);
+        } else {
+          stopContinuousSweep();
+        }
+      }
+
+      const circle = document.getElementById("breathCircle");
+      circle.classList.remove("TARIK_NAFAS", "TAHAN_1", "HEMBUS_NAFAS", "TAHAN_2");
+      circle.classList.add(phase);
+
+      let scale = 1.0;
+      if (phase === "TARIK_NAFAS") {
+        scale = 0.85 + 0.65 * prog; // Membesar perlahan mengikuti timer
+      } else if (phase === "TAHAN_1") {
+        scale = 1.5;
+      } else if (phase === "HEMBUS_NAFAS") {
+        scale = 1.5 - 0.65 * prog; // Mengecil perlahan mengikuti timer
+      } else if (phase === "TAHAN_2") {
+        scale = 0.85;
+      }
+      circle.style.transform = `scale(${scale.toFixed(3)})`;
+
+      const phaseLabels = {
+        TARIK_NAFAS: "TARIK NAFAS",
+        TAHAN_1: "TAHAN NAFAS",
+        HEMBUS_NAFAS: "HEMBUS NAFAS",
+        TAHAN_2: "TAHAN NAFAS",
+      };
+      document.getElementById("circleTimer").textContent = rem.toFixed(1);
+      document.getElementById("phaseTitle").textContent = phaseLabels[phase] || phase;
+      document.getElementById("cycleInfo").textContent = `Siklus #${cycle}`;
+
+      // Update panel kanan (Grafik 52 Subcarrier)
+      const hrf = data.hackrf;
+      const clipText = hrf.clipping_warning ? " | CLIPPING!" : "";
+      document.getElementById("rfMetrics").textContent =
+        `Paket: ${hrf.packets_detected} | rho: ${hrf.last_rho} | CFO: ${hrf.last_cfo_hz} Hz${clipText}`;
+
+      drawSubcarrierPlot("ampCanvas", hrf.subcarriers, hrf.latest_amp, "#3fb950", 0, null);
+      drawSubcarrierPlot("phaseCanvas", hrf.subcarriers, hrf.latest_phase, "#58a6ff", -Math.PI, Math.PI);
+    };
+
+    function submitSchedule() {
+      ensureAudio(); // Buka izin Web Audio API saat interaksi klik user
+      settings.subjectTag = document.getElementById("subjectTag").value.trim() || "P1_sesi1";
+      settings.freqMhz = Number(document.getElementById("freqMhz").value) || 2437;
+      settings.lnaGain = Number(document.getElementById("lnaGain").value);
+      settings.vgaGain = Number(document.getElementById("vgaGain").value);
+      persistSettings(settings);
+
+      ws.send(JSON.stringify({
+        action: "SCHEDULE",
+        start_time: document.getElementById("startTime").value,
+        subject_tag: settings.subjectTag,
+        freq_mhz: settings.freqMhz,
+        lna_gain: settings.lnaGain,
+        vga_gain: settings.vgaGain,
+        breath_cfg: {
+          inhale: settings.inhale,
+          hold1: settings.hold1,
+          exhale: settings.exhale,
+          hold2: settings.hold2,
+        },
+      }));
+    }
+
+    function stopSession() {
+      stopContinuousSweep();
+      ws.send(JSON.stringify({ action: "STOP" }));
+    }
+  </script>
+</body>
+
+</html>
