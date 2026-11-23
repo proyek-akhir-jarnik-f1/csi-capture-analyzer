@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Operator 2 — Ping Traffic Generator</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0d1117;
+      color: #e6edf3;
+      max-width: 1100px;
+      margin: 1.5rem auto;
+      padding: 0 1rem;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    .grid-3 {
+      display: flex;
+      gap: 1rem;
+    }
+
+    .grid-3>div {
+      flex: 1;
+      min-width: 0;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-bottom: 0.35rem;
+    }
+
+    input {
+      width: 100%;
+      height: 2.6rem;
+      padding: 0 0.75rem;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-family: inherit;
+      font-size: 1rem;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    button {
+      flex: 1;
+      height: 2.75rem;
+      padding: 0 1.2rem;
+      border: none;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: #238636;
+      color: #fff;
+    }
+
+    .btn-danger {
+      background: #da3633;
+      color: #fff;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.3rem 0.75rem;
+      border-radius: 999px;
+      font-weight: bold;
+      font-size: 0.9rem;
+    }
+
+    .IDLE {
+      background: #30363d;
+      color: #c9d1d9;
+    }
+
+    .SCHEDULED {
+      background: #9e6a03;
+      color: #fff;
+    }
+
+    .WARMUP {
+      background: #1f6feb;
+      color: #fff;
+    }
+
+    .ACTIVE {
+      background: #238636;
+      color: #fff;
+    }
+
+    .error {
+      color: #ff7b72;
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    pre#pingLog {
+      background: #0d1117;
+      border: 1px solid #21262d;
+      padding: 1rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      line-height: 1.45;
+      min-height: 360px;
+      max-height: 55vh;
+      overflow-y: auto;
+      overflow-x: auto;
+      color: #c9d1d9;
+      margin: 0.75rem 0 0 0;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
+    <div>
+      <div style="font-size:0.8rem; color:#8b949e;">OPERATOR 2 — PEMBANGKIT TRAFFIC PING</div>
+      <div style="font-size:0.8rem; color:#8b949e;">Waktu Sekarang</div>
+      <div id="liveClock" style="font-size:1.6rem; font-weight:bold;">--:--:--</div>
+    </div>
+    <span id="stateBadge" class="badge IDLE">IDLE</span>
+  </div>
+
+  <div class="card">
+    <div class="grid-3">
+      <div>
+        <label for="hotspotIp">IP Hotspot Tujuan (Tersimpan Lokal)</label>
+        <input id="hotspotIp" type="text" placeholder="192.168.96.1" />
+      </div>
+      <div>
+        <label for="agreedTime">Waktu yang Disepakati Operator 1</label>
+        <input id="agreedTime" type="time" step="1" />
+      </div>
+      <div>
+        <label for="intervalSec">Interval (dtk)</label>
+        <input id="intervalSec" type="number" value="0.01" step="0.005" min="0.001" />
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-primary" onclick="submitSchedule()">Jadwalkan Ping (Otomatis T - 5 Detik)</button>
+      <button class="btn-danger" onclick="stopPing()">Batalkan / Stop</button>
+    </div>
+    <div id="errorBox" class="error"></div>
+  </div>
+
+  <div class="card">
+    <div class="grid">
+      <div>Paket Terkirim / Terbalas: <strong id="pktStats">0 / 0</strong></div>
+      <div>RTT Terakhir: <strong id="lastRtt">-</strong> | Durasi Berjalan: <strong id="elapsedActive">-</strong></div>
+    </div>
+    <pre id="pingLog">Menunggu jadwal...</pre>
+  </div>
+
+  <script>
+    const STORAGE_KEY_IP = "csi_op2_hotspot_ip";
+    const DEFAULT_IP = "192.168.96.1";
+
+    const ipInput = document.getElementById("hotspotIp");
+    const savedIp = localStorage.getItem(STORAGE_KEY_IP);
+    ipInput.value = savedIp && savedIp.trim() !== "" ? savedIp : DEFAULT_IP;
+    if (!savedIp) {
+      localStorage.setItem(STORAGE_KEY_IP, DEFAULT_IP);
+    }
+    ipInput.addEventListener("input", () => {
+      localStorage.setItem(STORAGE_KEY_IP, ipInput.value.trim());
+    });
+
+    const initTime = new Date(Date.now() + 30000);
+    document.getElementById("agreedTime").value = initTime.toTimeString().slice(0, 8);
+
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type !== "STATE") return;
+
+      document.getElementById("liveClock").textContent = data.now_str;
+
+      const badge = document.getElementById("stateBadge");
+      badge.textContent = data.state;
+      badge.className = `badge ${data.state}`;
+
+      document.getElementById("elapsedActive").textContent =
+        data.elapsed_active_sec !== null ? `${data.elapsed_active_sec.toFixed(1)} dtk` : "-";
+
+      document.getElementById("pktStats").textContent =
+        `${data.ping.transmitted} / ${data.ping.received}`;
+      document.getElementById("lastRtt").textContent =
+        data.ping.last_rtt_ms !== null ? `${data.ping.last_rtt_ms} ms` : "-";
+
+      const err = data.error_message || data.ping.last_error || "";
+      document.getElementById("errorBox").textContent = err;
+
+      const logEl = document.getElementById("pingLog");
+      if (data.ping.recent_lines && data.ping.recent_lines.length > 0) {
+        logEl.textContent = data.ping.recent_lines.join("\n");
+        logEl.scrollTop = logEl.scrollHeight;
+      } else if (data.state === "IDLE") {
+        logEl.textContent = "Menunggu jadwal...";
+      }
+    };
+
+    function submitSchedule() {
+      const targetIp = ipInput.value.trim() || DEFAULT_IP;
+      localStorage.setItem(STORAGE_KEY_IP, targetIp);
+
+      ws.send(JSON.stringify({
+        action: "SCHEDULE",
+        target_ip: targetIp,
+        agreed_time: document.getElementById("agreedTime").value,
+        interval_sec: Number(document.getElementById("intervalSec").value),
+      }));
+    }
+
+    function stopPing() {
+      ws.send(JSON.stringify({ action: "STOP" }));
+    }
+  </script>
+</body>
+
+</html>
