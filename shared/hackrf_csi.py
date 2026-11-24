@@ -1,9 +1,12 @@
 import asyncio
 import csv
+import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -342,11 +345,79 @@ class HackRFLiveStats:
     latest_phase: list[float] = field(default_factory=list)
 
 
+def _windows_hackrf_candidates() -> list[Path]:
+    candidates: list[Path] = [
+        Path(sys.prefix) / "Library" / "bin" / "hackrf_transfer.exe",
+    ]
+    conda_prefix = os.environ.get("CONDA_PREFIX", "").strip()
+    if conda_prefix:
+        candidates.append(Path(conda_prefix) / "Library" / "bin" / "hackrf_transfer.exe")
+    candidates.append(Path.home() / "radioconda" / "Library" / "bin" / "hackrf_transfer.exe")
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "radioconda" / "Library" / "bin" / "hackrf_transfer.exe")
+    candidates.extend(
+        [
+            Path(r"C:\radioconda\Library\bin\hackrf_transfer.exe"),
+            Path(r"C:\ProgramData\radioconda\Library\bin\hackrf_transfer.exe"),
+            Path(r"C:\Program Files\PothosSDR\bin\hackrf_transfer.exe"),
+            Path(r"C:\Program Files\HackRF\hackrf_transfer.exe"),
+        ]
+    )
+    return candidates
+
+
+def _build_windows_env(exe_path: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    extra_dirs: list[str] = [str(exe_path.parent)]
+    if exe_path.parent.name.lower() == "bin" and exe_path.parent.parent.name.lower() == "library":
+        conda_root = exe_path.parent.parent.parent
+        extra_dirs.extend([str(conda_root), str(conda_root / "Scripts")])
+
+    existing_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for part in extra_dirs + existing_parts:
+        norm = os.path.normcase(os.path.normpath(part))
+        if norm not in seen:
+            seen.add(norm)
+            merged.append(part)
+    env["PATH"] = os.pathsep.join(merged)
+    return env
+
+
+def resolve_hackrf_transfer() -> tuple[str, dict[str, str] | None]:
+    """Cari binary hackrf_transfer dari env override, PATH, atau folder standar Windows."""
+    env_override = os.environ.get("HACKRF_TRANSFER_BIN", "").strip()
+    if env_override:
+        override_path = Path(env_override)
+        if override_path.is_file():
+            env = _build_windows_env(override_path) if sys.platform == "win32" else None
+            return str(override_path), env
+
+    in_path = shutil.which("hackrf_transfer")
+    if in_path:
+        return in_path, None
+
+    if sys.platform == "win32":
+        for candidate in _windows_hackrf_candidates():
+            if candidate.is_file():
+                return str(candidate), _build_windows_env(candidate)
+        raise FileNotFoundError(
+            "hackrf_transfer tidak ditemukan di PATH maupun folder Radioconda standar. "
+            "Install Radioconda, jalankan dari Radioconda Prompt, atau set env HACKRF_TRANSFER_BIN."
+        )
+
+    return "hackrf_transfer", None
+
+
 class HackRFRecorder:
     def __init__(self, on_update: Callable[[], Awaitable[None]] | None = None) -> None:
         self.stats = HackRFLiveStats()
         self._proc: subprocess.Popen[bytes] | None = None
         self._thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_lines: deque[str] = deque(maxlen=20)
         self._stop_event = threading.Event()
         self._on_update = on_update
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -367,13 +438,16 @@ class HackRFRecorder:
         lna_valid = max(0, min(40, (int(lna_gain) // 8) * 8))
         vga_valid = max(0, min(62, (int(vga_gain) // 2) * 2))
 
+        exe_path, proc_env = resolve_hackrf_transfer()
+
         self.stats = HackRFLiveStats(
             recording=True,
             cs8_path=str(cs8_path),
         )
+        self._stderr_lines.clear()
 
         cmd = [
-            "hackrf_transfer",
+            exe_path,
             "-r",
             "-",
             "-f",
@@ -395,14 +469,32 @@ class HackRFRecorder:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=proc_env,
             bufsize=1024 * 1024,
         )
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_worker,
+            args=(self._proc,),
+            daemon=True,
+        )
+        self._stderr_thread.start()
         self._thread = threading.Thread(
             target=self._io_worker,
             args=(cs8_path, float(sample_rate)),
             daemon=True,
         )
         self._thread.start()
+
+    def _stderr_worker(self, proc: subprocess.Popen[bytes]) -> None:
+        if proc.stderr is None:
+            return
+        try:
+            for raw_line in iter(proc.stderr.readline, b""):
+                text = raw_line.decode("utf-8", errors="replace").strip()
+                if text:
+                    self._stderr_lines.append(text)
+        except Exception:
+            pass
 
     def _notify_async(self) -> None:
         if self._on_update and self._loop and not self._loop.is_closed():
@@ -456,12 +548,18 @@ class HackRFRecorder:
             self.stats.last_error = f"Error I/O HackRF: {exc}"
         finally:
             if self._proc:
-                self._proc.wait(timeout=1.0)
-                err_txt = ""
-                if self._proc.stderr:
-                    err_txt = self._proc.stderr.read().decode("utf-8", errors="replace").strip()
-                if err_txt and not self.stats.last_error:
-                    self.stats.last_error = " | ".join(err_txt.splitlines())
+                try:
+                    self._proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+            if self._stderr_thread and self._stderr_thread.is_alive():
+                self._stderr_thread.join(timeout=1.0)
+            if (
+                self._stderr_lines
+                and (not self._stop_event.is_set() or self.stats.bytes_written == 0)
+                and not self.stats.last_error
+            ):
+                self.stats.last_error = " | ".join(self._stderr_lines)
             self.stats.recording = False
             self._notify_async()
 
@@ -476,6 +574,8 @@ class HackRFRecorder:
                 self._proc.wait()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        if self._stderr_thread and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=1.0)
         self.stats.recording = False
 
 

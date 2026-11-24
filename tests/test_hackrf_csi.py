@@ -1,18 +1,27 @@
+import asyncio
 import csv
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+import shared.hackrf_csi as hackrf_csi
 from shared.hackrf_csi import (
     IDX_FFT,
     LTF_NORM,
     LTF_TIME,
     SUBCARRIER_INDICES,
     X_FREQ,
+    HackRFRecorder,
     cari_ltf,
     csi_dari_ltf,
     detect_bursts_and_extract,
     extract_cs8_to_csv,
+    resolve_hackrf_transfer,
     sanitize_phase,
 )
 
@@ -129,6 +138,91 @@ def test_extract_cs8_to_csv_handles_missing_cue_log(tmp_path) -> None:
     with open(out_path, newline="", encoding="utf-8") as f:
         first = next(csv.DictReader(f))
     assert first["label"] == "IDLE"
+
+
+def test_resolve_hackrf_transfer_env_override(tmp_path, monkeypatch) -> None:
+    fake_exe = tmp_path / "Library" / "bin" / "hackrf_transfer.exe"
+    fake_exe.parent.mkdir(parents=True)
+    fake_exe.write_bytes(b"")
+
+    monkeypatch.setenv("HACKRF_TRANSFER_BIN", str(fake_exe))
+    monkeypatch.setattr(hackrf_csi.shutil, "which", lambda _name: None)
+
+    resolved, env = resolve_hackrf_transfer()
+    assert resolved == str(fake_exe)
+    if sys.platform == "win32":
+        assert env is not None
+        assert str(fake_exe.parent) in env["PATH"].split(os.pathsep)
+
+
+def test_resolve_hackrf_transfer_windows_radioconda_fallback(tmp_path, monkeypatch) -> None:
+    fake_root = tmp_path / "radioconda"
+    fake_exe = fake_root / "Library" / "bin" / "hackrf_transfer.exe"
+    fake_exe.parent.mkdir(parents=True)
+    fake_exe.write_bytes(b"")
+
+    monkeypatch.delenv("HACKRF_TRANSFER_BIN", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(hackrf_csi.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(hackrf_csi.sys, "platform", "win32")
+    monkeypatch.setattr(hackrf_csi.sys, "prefix", str(fake_root))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    resolved, env = resolve_hackrf_transfer()
+    assert resolved == str(fake_exe)
+    assert env is not None
+    path_parts = env["PATH"].split(os.pathsep)
+    assert path_parts[0] == str(fake_exe.parent)
+    assert str(fake_root) in path_parts
+
+
+def test_resolve_hackrf_transfer_windows_missing_raises(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("HACKRF_TRANSFER_BIN", raising=False)
+    monkeypatch.setattr(hackrf_csi.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(hackrf_csi.sys, "platform", "win32")
+    monkeypatch.setattr(
+        hackrf_csi,
+        "_windows_hackrf_candidates",
+        lambda: [tmp_path / "missing" / "hackrf_transfer.exe"],
+    )
+
+    with pytest.raises(FileNotFoundError, match="Radioconda"):
+        resolve_hackrf_transfer()
+
+
+def test_hackrf_recorder_drains_large_stderr_without_deadlock(tmp_path, monkeypatch) -> None:
+    child_code = (
+        "import sys, time\n"
+        "for i in range(400):\n"
+        "    sys.stderr.write(f'stderr progress line {i:04d} ' + 'x' * 40 + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "sys.stdout.buffer.write(b'\\x01' * (512 * 1024))\n"
+        "sys.stdout.buffer.flush()\n"
+        "time.sleep(5)\n"
+    )
+    real_popen = subprocess.Popen
+
+    def fake_popen(_cmd, **kwargs):
+        return real_popen([sys.executable, "-c", child_code], **kwargs)
+
+    monkeypatch.setattr(hackrf_csi, "resolve_hackrf_transfer", lambda: ("hackrf_transfer", None))
+    monkeypatch.setattr(hackrf_csi.subprocess, "Popen", fake_popen)
+
+    async def run_check() -> None:
+        recorder = HackRFRecorder()
+        cs8_path = tmp_path / "stderr_drain.cs8"
+        recorder.start(cs8_path=cs8_path)
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline and recorder.stats.bytes_written < 512 * 1024:
+            await asyncio.sleep(0.05)
+        recorder.stop()
+
+        assert recorder.stats.bytes_written >= 512 * 1024
+        assert recorder.stats.recording is False
+        assert recorder.stats.last_error is None
+
+    asyncio.run(run_check())
 
 
 if __name__ == "__main__":
