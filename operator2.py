@@ -1,8 +1,12 @@
 import asyncio
 import csv
+import ipaddress
 import json
+import os
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -11,14 +15,16 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from shared.ping_worker import SubprocessPingWorker
+from shared.session_archive import list_session_files, resolve_log_file
 
 HOST = "127.0.0.1"
 PORT = 8002
 WARMUP_LEAD_SEC = 5.0
+OP1_BASE_URL = os.getenv("CSI_OP1_URL", "http://127.0.0.1:8001").rstrip("/")
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
@@ -53,6 +59,19 @@ class Operator2Coordinator:
         return candidate
 
     def schedule(self, agreed_time_str: str, target_ip: str, interval_sec: float) -> None:
+        if self.state_label in ("WARMUP", "ACTIVE"):
+            raise ValueError("Ping sedang berjalan. Hentikan terlebih dahulu sebelum menjadwalkan ulang.")
+
+        clean_ip = target_ip.strip() or "192.168.96.1"
+        try:
+            ipaddress.ip_address(clean_ip)
+        except ValueError as exc:
+            raise ValueError(f"IP tujuan tidak valid: {target_ip}") from exc
+
+        interval_value = float(interval_sec)
+        if not 0.001 <= interval_value <= 1.0:
+            raise ValueError("Interval harus antara 0.001 dan 1.0 detik.")
+
         agreed_dt = self._parse_agreed_time(agreed_time_str)
         ping_start = agreed_dt - timedelta(seconds=WARMUP_LEAD_SEC)
         now = datetime.now()
@@ -65,8 +84,8 @@ class Operator2Coordinator:
 
         self.agreed_start_dt = agreed_dt
         self.ping_start_dt = ping_start
-        self.target_ip = target_ip.strip() or "192.168.96.1"
-        self.interval_sec = interval_sec
+        self.target_ip = clean_ip
+        self.interval_sec = interval_value
         self.state_label = "SCHEDULED"
         self.error_message = None
         self._ping_started_for_schedule = False
@@ -117,7 +136,14 @@ class Operator2Coordinator:
                 if now >= self.ping_start_dt and not self._ping_started_for_schedule:
                     self._ping_started_for_schedule = True
                     self.state_label = "WARMUP"
-                    await self.worker.start(self.target_ip, self.interval_sec)
+                    try:
+                        await self.worker.start(self.target_ip, self.interval_sec)
+                    except Exception as exc:
+                        self.state_label = "IDLE"
+                        self.agreed_start_dt = None
+                        self.ping_start_dt = None
+                        self._ping_started_for_schedule = False
+                        self.error_message = f"Gagal menjalankan ping: {exc}"
 
                 if now >= self.agreed_start_dt and self.state_label == "WARMUP":
                     self.state_label = "ACTIVE"
@@ -148,7 +174,36 @@ class Operator2Coordinator:
             "countdown_op1_sec": countdown_op1_sec,
             "elapsed_active_sec": elapsed_active_sec,
             "error_message": self.error_message,
+            "op1_base_url": OP1_BASE_URL,
             "ping": asdict(self.worker.stats),
+        }
+
+    async def fetch_op1_schedule(self) -> dict[str, Any]:
+        """Ambil waktu mulai yang sudah dijadwalkan Operator 1 (opsional)."""
+
+        def _request() -> dict[str, Any]:
+            req = urllib.request.Request(
+                f"{OP1_BASE_URL}/api/session", headers={"Accept": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=3) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        try:
+            data = await asyncio.to_thread(_request)
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            raise ValueError(f"Gagal menghubungi Operator 1 di {OP1_BASE_URL}: {exc}") from exc
+
+        if data.get("state") not in ("SCHEDULED", "RUNNING"):
+            raise ValueError("Operator 1 belum memiliki jadwal aktif.")
+        agreed_time = data.get("scheduled_start_str") or ""
+        if not agreed_time or agreed_time == "-":
+            raise ValueError("Waktu mulai Operator 1 tidak tersedia.")
+        return {
+            "ok": True,
+            "agreed_time": agreed_time,
+            "session_id": data.get("session_id", ""),
+            "state": data["state"],
+            "countdown_start_sec": data.get("countdown_start_sec"),
         }
 
     async def broadcast_state(self) -> None:
@@ -182,6 +237,31 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(BASE_DIR / "templates" / "operator2.html")
+
+
+@app.get("/api/op1-schedule")
+async def api_op1_schedule() -> dict[str, Any]:
+    try:
+        return await coordinator.fetch_op1_schedule()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/files")
+async def api_files() -> dict[str, Any]:
+    files = await asyncio.to_thread(list_session_files, LOG_DIR)
+    return {"files": [item for item in files if item["kind"] == "audit"]}
+
+
+@app.get("/api/files/{name}")
+async def api_download(name: str) -> FileResponse:
+    try:
+        path = resolve_log_file(LOG_DIR, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return FileResponse(path, filename=name, media_type="text/csv")
 
 
 @app.websocket("/ws")

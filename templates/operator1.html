@@ -131,6 +131,35 @@
       font-size: 0.9rem;
     }
 
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    table.archive-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    table.archive-table th,
+    table.archive-table td {
+      text-align: left;
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid #21262d;
+      white-space: nowrap;
+    }
+
+    table.archive-table th {
+      color: #8b949e;
+      font-weight: normal;
+    }
+
+    table.archive-table a {
+      color: #58a6ff;
+      text-decoration: none;
+    }
+
     /* Modal Setting Napas */
     .modal-backdrop {
       display: none;
@@ -268,6 +297,7 @@
     </div>
     <div style="display:flex; align-items:center; gap:0.75rem;">
       <span id="countdownPill" style="color:#e3b341; font-weight:bold;"></span>
+      <span id="wsStatus" class="badge IDLE" style="font-size:0.7rem;">WS: ...</span>
       <span id="stateBadge" class="badge IDLE">IDLE</span>
       <button id="topStopBtn" class="btn-danger" style="display:none; width:auto; flex:none;"
         onclick="stopSession()">Stop Sesi</button>
@@ -301,13 +331,45 @@
 
     <div class="btn-row">
       <button class="btn-secondary" onclick="openBreathModal()">Setting Napas</button>
-      <button class="btn-primary" onclick="submitSchedule()">Jadwalkan Start</button>
-      <button class="btn-danger" onclick="stopSession()">Batalkan Jadwal</button>
+      <button id="scheduleBtn" class="btn-primary" onclick="submitSchedule()">Jadwalkan Start</button>
+      <button id="cancelBtn" class="btn-danger" onclick="stopSession()">Batalkan Jadwal</button>
     </div>
 
     <div id="breathSummary" style="margin-top:0.85rem; font-size:0.85rem; color:#8b949e;"></div>
     <div id="errorBox" class="error"></div>
     <div id="noteBox" class="note"></div>
+  </div>
+
+  <!-- Arsip & Analisis Ringkas -->
+  <div id="archiveView" class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
+      <div>
+        <div style="font-weight:bold;">Arsip & Analisis Sesi</div>
+        <div style="font-size:0.8rem; color:#8b949e;">Ringkasan otomatis dari file *_csi.csv di folder logs/</div>
+      </div>
+      <button id="refreshArchiveBtn" class="btn-secondary" style="flex:none; width:auto; height:2.4rem;"
+        onclick="loadArchive()">Muat Ulang</button>
+    </div>
+    <div id="lastSummary" class="note"></div>
+    <div style="overflow-x:auto; margin-top:0.5rem;">
+      <table class="archive-table">
+        <thead>
+          <tr>
+            <th>Sesi</th>
+            <th>Jenis</th>
+            <th>Paket</th>
+            <th>Durasi</th>
+            <th>RSSI rata-rata</th>
+            <th>Fase Dominan</th>
+            <th>Ukuran</th>
+            <th>File</th>
+          </tr>
+        </thead>
+        <tbody id="archiveBody">
+          <tr><td colspan="8" style="color:#8b949e;">Belum ada arsip.</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Modal Setting Siklus Napas -->
@@ -568,9 +630,35 @@
       ctx.stroke();
     }
 
-    const ws = new WebSocket(`ws://${location.host}/ws`);
+    let ws = null;
+    let reconnectDelay = 1000;
+    let reconnectTimer = null;
+    let lastState = "";
 
-    ws.onmessage = (event) => {
+    function connectWS() {
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      const status = document.getElementById("wsStatus");
+      status.textContent = "WS: connecting";
+      status.className = "badge SCHEDULED";
+      ws = new WebSocket(`${scheme}://${location.host}/ws`);
+
+      ws.onopen = () => {
+        reconnectDelay = 1000;
+        status.textContent = "WS: online";
+        status.className = "badge RUNNING";
+      };
+      ws.onerror = () => ws.close();
+      ws.onclose = () => {
+        status.textContent = "WS: offline";
+        status.className = "badge IDLE";
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectWS, reconnectDelay);
+        reconnectDelay = Math.min(10000, reconnectDelay * 2);
+      };
+      ws.onmessage = handleState;
+    }
+
+    function handleState(event) {
       const data = JSON.parse(event.data);
       if (data.type !== "STATE") return;
 
@@ -594,8 +682,24 @@
         cdPill.textContent = "";
       }
 
+      const isIdle = data.state === "IDLE";
+      document.getElementById("scheduleBtn").disabled = !isIdle;
+      document.getElementById("cancelBtn").disabled = isIdle;
+
       document.getElementById("errorBox").textContent = data.error_message || data.hackrf.last_error || "";
       document.getElementById("noteBox").textContent = data.status_note || "";
+
+      const sum = data.last_summary;
+      document.getElementById("lastSummary").textContent = sum
+        ? `Sesi terakhir: ${sum.packets} paket | durasi ${sum.duration_sec ?? "-"} dtk | `
+          + `RSSI ${sum.mean_rssi_dbfs ?? "-"} dBFS | rho ${sum.mean_rho ?? "-"} | `
+          + `fase: ${Object.entries(sum.phase_counts || {}).map(([k, v]) => `${k}=${v}`).join(", ") || "-"}`
+        : "";
+
+      if (data.state !== lastState) {
+        lastState = data.state;
+        if (isIdle) loadArchive();
+      }
 
       // Deteksi ketukan baru (termasuk 3 ketukan pra-start sebelum T=0)
       if (data.breath.knock_event_id !== lastKnockId) {
@@ -665,19 +769,89 @@
 
       drawSubcarrierPlot("ampCanvas", hrf.subcarriers, hrf.latest_amp, "#3fb950", 0, null);
       drawSubcarrierPlot("phaseCanvas", hrf.subcarriers, hrf.latest_phase, "#58a6ff", -Math.PI, Math.PI);
-    };
+    }
+
+    function mostCommonPhase(counts) {
+      if (!counts) return "-";
+      const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+      return sorted.length ? sorted[0][0] : "-";
+    }
+
+    async function loadArchive() {
+      const body = document.getElementById("archiveBody");
+      try {
+        const response = await fetch("/api/files");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const files = (await response.json()).files || [];
+        body.replaceChildren();
+        if (!files.length) {
+          const empty = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 8;
+          cell.textContent = "Belum ada arsip.";
+          cell.style.color = "#8b949e";
+          empty.appendChild(cell);
+          body.appendChild(empty);
+          return;
+        }
+
+        for (const file of files) {
+          const s = file.summary || {};
+          const row = document.createElement("tr");
+          const columns = [
+            file.session_id,
+            file.kind,
+            s.packets ?? "-",
+            s.duration_sec != null ? `${s.duration_sec} dtk` : "-",
+            s.mean_rssi_dbfs != null ? `${s.mean_rssi_dbfs} dBFS` : "-",
+            mostCommonPhase(s.phase_counts),
+            `${(file.size_bytes / 1024).toFixed(1)} KB`,
+          ];
+          for (const value of columns) {
+            const cell = document.createElement("td");
+            cell.textContent = String(value);
+            row.appendChild(cell);
+          }
+          const linkCell = document.createElement("td");
+          const link = document.createElement("a");
+          link.href = `/api/files/${encodeURIComponent(file.name)}`;
+          link.download = file.name;
+          link.textContent = "Unduh";
+          linkCell.appendChild(link);
+          row.appendChild(linkCell);
+          body.appendChild(row);
+        }
+      } catch (error) {
+        const failed = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 8;
+        cell.textContent = `Gagal memuat arsip: ${error}`;
+        cell.style.color = "#ff7b72";
+        failed.appendChild(cell);
+        body.replaceChildren(failed);
+      }
+    }
 
     function submitSchedule() {
+      const startTime = document.getElementById("startTime").value;
+      if (!startTime) {
+        document.getElementById("errorBox").textContent = "Waktu mulai wajib diisi.";
+        return;
+      }
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        document.getElementById("errorBox").textContent = "Koneksi WebSocket belum siap. Tunggu status online.";
+        return;
+      }
       ensureAudio(); // Buka izin Web Audio API saat interaksi klik user
       settings.subjectTag = document.getElementById("subjectTag").value.trim() || "P1_sesi1";
-      settings.freqMhz = Number(document.getElementById("freqMhz").value) || 2437;
-      settings.lnaGain = Number(document.getElementById("lnaGain").value);
-      settings.vgaGain = Number(document.getElementById("vgaGain").value);
+      settings.freqMhz = Math.min(6000, Math.max(2400, Number(document.getElementById("freqMhz").value) || 2437));
+      settings.lnaGain = Math.min(40, Math.max(0, Number(document.getElementById("lnaGain").value)));
+      settings.vgaGain = Math.min(62, Math.max(0, Number(document.getElementById("vgaGain").value)));
       persistSettings(settings);
 
       ws.send(JSON.stringify({
         action: "SCHEDULE",
-        start_time: document.getElementById("startTime").value,
+        start_time: startTime,
         subject_tag: settings.subjectTag,
         freq_mhz: settings.freqMhz,
         lna_gain: settings.lnaGain,
@@ -693,8 +867,13 @@
 
     function stopSession() {
       stopContinuousSweep();
-      ws.send(JSON.stringify({ action: "STOP" }));
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: "STOP" }));
+      }
     }
+
+    connectWS();
+    loadArchive();
   </script>
 </body>
 
