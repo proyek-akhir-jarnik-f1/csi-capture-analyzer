@@ -84,6 +84,11 @@
       color: #fff;
     }
 
+    .btn-secondary {
+      background: #1f6feb;
+      color: #fff;
+    }
+
     .btn-danger {
       background: #da3633;
       color: #fff;
@@ -123,6 +128,35 @@
       font-size: 0.9rem;
     }
 
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    table.archive-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    table.archive-table th,
+    table.archive-table td {
+      text-align: left;
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid #21262d;
+      white-space: nowrap;
+    }
+
+    table.archive-table th {
+      color: #8b949e;
+      font-weight: normal;
+    }
+
+    table.archive-table a {
+      color: #58a6ff;
+      text-decoration: none;
+    }
+
     pre#pingLog {
       background: #0d1117;
       border: 1px solid #21262d;
@@ -147,7 +181,13 @@
       <div style="font-size:0.8rem; color:#8b949e;">Waktu Sekarang</div>
       <div id="liveClock" style="font-size:1.6rem; font-weight:bold;">--:--:--</div>
     </div>
-    <span id="stateBadge" class="badge IDLE">IDLE</span>
+    <div style="display:flex; align-items:center; gap:0.75rem;">
+      <span id="countdownPill" style="color:#e3b341; font-weight:bold;"></span>
+      <span id="wsStatus" class="badge IDLE" style="font-size:0.7rem;">WS: ...</span>
+      <span id="stateBadge" class="badge IDLE">IDLE</span>
+      <button id="topStopBtn" class="btn-danger" style="display:none; width:auto; flex:none;"
+        onclick="stopPing()">Stop Ping</button>
+    </div>
   </div>
 
   <div class="card">
@@ -167,9 +207,11 @@
     </div>
 
     <div class="btn-row">
-      <button class="btn-primary" onclick="submitSchedule()">Jadwalkan Ping (Otomatis T - 5 Detik)</button>
-      <button class="btn-danger" onclick="stopPing()">Batalkan / Stop</button>
+      <button class="btn-primary" onclick="submitSchedule()" id="scheduleBtn">Jadwalkan Ping (T - 5 Detik)</button>
+      <button class="btn-secondary" onclick="syncSchedule()" id="syncBtn">Ambil Jadwal O1</button>
+      <button class="btn-danger" onclick="stopPing()" id="stopBtn">Batalkan / Stop</button>
     </div>
+    <div id="syncNote" class="note" style="color:#8b949e;"></div>
     <div id="errorBox" class="error"></div>
   </div>
 
@@ -179,6 +221,30 @@
       <div>RTT Terakhir: <strong id="lastRtt">-</strong> | Durasi Berjalan: <strong id="elapsedActive">-</strong></div>
     </div>
     <pre id="pingLog">Menunggu jadwal...</pre>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
+      <div>
+        <div style="font-weight:bold;">Arsip Audit Ping</div>
+        <div style="font-size:0.8rem; color:#8b949e;">Log ringkasan dibuat setiap kali sesi ping dihentikan</div>
+      </div>
+      <button class="btn-secondary" style="flex:none; width:auto; height:2.4rem;" onclick="loadArchive()">Muat Ulang</button>
+    </div>
+    <div style="overflow-x:auto; margin-top:0.75rem;">
+      <table class="archive-table">
+        <thead>
+          <tr>
+            <th>Sesi</th>
+            <th>Ukuran</th>
+            <th>File</th>
+          </tr>
+        </thead>
+        <tbody id="archiveBody">
+          <tr><td colspan="3" style="color:#8b949e;">Belum ada arsip.</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <script>
@@ -198,9 +264,35 @@
     const initTime = new Date(Date.now() + 30000);
     document.getElementById("agreedTime").value = initTime.toTimeString().slice(0, 8);
 
-    const ws = new WebSocket(`ws://${location.host}/ws`);
+    let ws = null;
+    let reconnectDelay = 1000;
+    let reconnectTimer = null;
+    let lastState = "";
 
-    ws.onmessage = (event) => {
+    function connectWS() {
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      const status = document.getElementById("wsStatus");
+      status.textContent = "WS: connecting";
+      status.className = "badge SCHEDULED";
+      ws = new WebSocket(`${scheme}://${location.host}/ws`);
+
+      ws.onopen = () => {
+        reconnectDelay = 1000;
+        status.textContent = "WS: online";
+        status.className = "badge RUNNING";
+      };
+      ws.onerror = () => ws.close();
+      ws.onclose = () => {
+        status.textContent = "WS: offline";
+        status.className = "badge IDLE";
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectWS, reconnectDelay);
+        reconnectDelay = Math.min(10000, reconnectDelay * 2);
+      };
+      ws.onmessage = handleState;
+    }
+
+    function handleState(event) {
       const data = JSON.parse(event.data);
       if (data.type !== "STATE") return;
 
@@ -209,6 +301,29 @@
       const badge = document.getElementById("stateBadge");
       badge.textContent = data.state;
       badge.className = `badge ${data.state}`;
+
+      const isIdle = data.state === "IDLE";
+      document.getElementById("scheduleBtn").disabled = !isIdle;
+      document.getElementById("syncBtn").disabled = !isIdle;
+      document.getElementById("stopBtn").disabled = isIdle;
+      document.getElementById("topStopBtn").style.display =
+        data.state === "WARMUP" || data.state === "ACTIVE" ? "inline-block" : "none";
+
+      const pill = document.getElementById("countdownPill");
+      if (data.countdown_ping_sec > 0) {
+        pill.textContent = `Ping dalam ${data.countdown_ping_sec.toFixed(1)} dtk`;
+      } else if (data.countdown_op1_sec > 0) {
+        pill.textContent = `O1 mulai dalam ${data.countdown_op1_sec.toFixed(1)} dtk`;
+      } else {
+        pill.textContent = "";
+      }
+      document.getElementById("syncNote").textContent =
+        `Sinkron manual: ${data.op1_base_url || "http://127.0.0.1:8001"}`;
+
+      if (data.state !== lastState) {
+        lastState = data.state;
+        if (isIdle) loadArchive();
+      }
 
       document.getElementById("elapsedActive").textContent =
         data.elapsed_active_sec !== null ? `${data.elapsed_active_sec.toFixed(1)} dtk` : "-";
@@ -228,23 +343,97 @@
       } else if (data.state === "IDLE") {
         logEl.textContent = "Menunggu jadwal...";
       }
-    };
+    }
+
+    async function syncSchedule() {
+      const note = document.getElementById("syncNote");
+      note.style.color = "#8b949e";
+      note.textContent = "Mengambil jadwal dari Operator 1...";
+      try {
+        const response = await fetch("/api/op1-schedule");
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+        document.getElementById("agreedTime").value = payload.agreed_time;
+        note.textContent = `Jadwal ${payload.session_id || "O1"} (${payload.state}) diambil: ${payload.agreed_time}`;
+      } catch (error) {
+        note.textContent = `Gagal mengambil jadwal: ${error.message || error}`;
+        note.style.color = "#ff7b72";
+      }
+    }
+
+    async function loadArchive() {
+      const body = document.getElementById("archiveBody");
+      try {
+        const response = await fetch("/api/files");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const files = (await response.json()).files || [];
+        body.replaceChildren();
+        if (!files.length) {
+          const empty = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 3;
+          cell.textContent = "Belum ada arsip.";
+          cell.style.color = "#8b949e";
+          empty.appendChild(cell);
+          body.appendChild(empty);
+          return;
+        }
+
+        for (const file of files) {
+          const row = document.createElement("tr");
+          const nameCell = document.createElement("td");
+          nameCell.textContent = file.session_id;
+          const sizeCell = document.createElement("td");
+          sizeCell.textContent = `${(file.size_bytes / 1024).toFixed(1)} KB`;
+          const linkCell = document.createElement("td");
+          const link = document.createElement("a");
+          link.href = `/api/files/${encodeURIComponent(file.name)}`;
+          link.download = file.name;
+          link.textContent = "Unduh";
+          linkCell.appendChild(link);
+          row.append(nameCell, sizeCell, linkCell);
+          body.appendChild(row);
+        }
+      } catch (error) {
+        const failed = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 3;
+        cell.textContent = `Gagal memuat arsip: ${error}`;
+        cell.style.color = "#ff7b72";
+        failed.appendChild(cell);
+        body.replaceChildren(failed);
+      }
+    }
 
     function submitSchedule() {
+      const agreedTime = document.getElementById("agreedTime").value;
+      if (!agreedTime) {
+        document.getElementById("errorBox").textContent = "Waktu yang disepakati wajib diisi.";
+        return;
+      }
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        document.getElementById("errorBox").textContent = "Koneksi WebSocket belum siap. Tunggu status online.";
+        return;
+      }
       const targetIp = ipInput.value.trim() || DEFAULT_IP;
       localStorage.setItem(STORAGE_KEY_IP, targetIp);
 
       ws.send(JSON.stringify({
         action: "SCHEDULE",
         target_ip: targetIp,
-        agreed_time: document.getElementById("agreedTime").value,
+        agreed_time: agreedTime,
         interval_sec: Number(document.getElementById("intervalSec").value),
       }));
     }
 
     function stopPing() {
-      ws.send(JSON.stringify({ action: "STOP" }));
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: "STOP" }));
+      }
     }
+
+    connectWS();
+    loadArchive();
   </script>
 </body>
 

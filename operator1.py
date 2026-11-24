@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from shared.hackrf_csi import HackRFRecorder, extract_cs8_to_csv
+from shared.session_archive import list_session_files, resolve_log_file, summarize_csi_csv
 
 HOST = "127.0.0.1"
 PORT = 8001
@@ -61,6 +62,7 @@ class Operator1Coordinator:
 
         self.error_message: str | None = None
         self.status_note: str = ""
+        self.last_summary: dict[str, Any] | None = None
         self.recorder = HackRFRecorder(on_update=self.broadcast_state)
 
     def _parse_time(self, time_str: str) -> datetime:
@@ -90,6 +92,16 @@ class Operator1Coordinator:
         if self.state_label in ("RUNNING", "EXTRACTING"):
             raise ValueError("Sesi sedang berjalan. Hentikan sesi terlebih dahulu.")
 
+        freq_value = float(freq_mhz)
+        lna_value = int(lna_gain)
+        vga_value = int(vga_gain)
+        if not 2400.0 <= freq_value <= 6000.0:
+            raise ValueError("Frekuensi harus antara 2400 dan 6000 MHz.")
+        if not 0 <= lna_value <= 40:
+            raise ValueError("LNA gain harus antara 0 dan 40 dB.")
+        if not 0 <= vga_value <= 62:
+            raise ValueError("VGA gain harus antara 0 dan 62 dB.")
+
         start_dt = self._parse_time(start_time_str)
         now = datetime.now()
         if start_dt <= now + timedelta(seconds=1.5):
@@ -101,18 +113,19 @@ class Operator1Coordinator:
         clean_tag = "".join(c if c.isalnum() or c in "-_" else "_" for c in subject_tag.strip()) or "subjek"
         self.session_id = f"{clean_tag}_{start_dt.strftime('%Y%m%d_%H%M%S')}"
         self.scheduled_start_dt = start_dt
-        self.freq_hz = int(round(freq_mhz * 1_000_000))
-        self.lna_gain = int(lna_gain)
-        self.vga_gain = int(vga_gain)
+        self.freq_hz = int(round(freq_value * 1_000_000))
+        self.lna_gain = lna_value
+        self.vga_gain = vga_value
 
-        self.dur_inhale = max(1.0, float(breath_cfg.get("inhale", 4.0)))
-        self.dur_hold1 = max(0.0, float(breath_cfg.get("hold1", 4.0)))
-        self.dur_exhale = max(1.0, float(breath_cfg.get("exhale", 4.0)))
-        self.dur_hold2 = max(0.0, float(breath_cfg.get("hold2", 4.0)))
+        self.dur_inhale = min(60.0, max(1.0, float(breath_cfg.get("inhale", 4.0))))
+        self.dur_hold1 = min(60.0, max(0.0, float(breath_cfg.get("hold1", 4.0))))
+        self.dur_exhale = min(60.0, max(1.0, float(breath_cfg.get("exhale", 4.0))))
+        self.dur_hold2 = min(60.0, max(0.0, float(breath_cfg.get("hold2", 4.0))))
 
         self.state_label = "SCHEDULED"
         self.error_message = None
         self.status_note = ""
+        self.last_summary = None
         self._last_prestart_knock_idx = -1
 
     def _open_cue_log(self) -> None:
@@ -142,16 +155,24 @@ class Operator1Coordinator:
         self.start_mono_ns = time.monotonic_ns()
         self._last_logged_phase_key = ""
         self._logged_knock_keys.clear()
+        self.current_phase = "IDLE"
+        self.cycle_index = 0
+        self.phase_remaining_sec = 0.0
+        self.phase_progress = 0.0
         self._open_cue_log()
 
         assert self._cs8_path is not None
-        self.recorder.start(
-            cs8_path=self._cs8_path,
-            freq_hz=self.freq_hz,
-            sample_rate=20_000_000,
-            lna_gain=self.lna_gain,
-            vga_gain=self.vga_gain,
-        )
+        try:
+            self.recorder.start(
+                cs8_path=self._cs8_path,
+                freq_hz=self.freq_hz,
+                sample_rate=20_000_000,
+                lna_gain=self.lna_gain,
+                vga_gain=self.vga_gain,
+            )
+        except Exception:
+            self._close_cue_log()
+            raise
         self.state_label = "RUNNING"
 
     async def stop_or_cancel(self) -> None:
@@ -177,6 +198,8 @@ class Operator1Coordinator:
                         self._cue_path,
                         self._csi_csv_path,
                     )
+                    summary = await asyncio.to_thread(summarize_csi_csv, self._csi_csv_path)
+                    self.last_summary = summary.as_dict() if summary else None
                     self.recorder.stats.csi_csv_path = str(self._csi_csv_path)
                     self.status_note = (
                         f"Selesai! {pkt_count} paket CSI tersimpan di {self._csi_csv_path.name} "
@@ -248,7 +271,12 @@ class Operator1Coordinator:
                         self.knock_event_id += 1
 
                 if now >= self.scheduled_start_dt:
-                    self._begin_running()
+                    try:
+                        self._begin_running()
+                    except Exception as exc:
+                        self.state_label = "IDLE"
+                        self.scheduled_start_dt = None
+                        self.error_message = f"Gagal memulai perekaman: {exc}"
 
             if self.state_label == "RUNNING":
                 elapsed_s = (time.monotonic_ns() - self.start_mono_ns) / 1e9
@@ -273,6 +301,7 @@ class Operator1Coordinator:
             "state": self.state_label,
             "session_id": self.session_id,
             "scheduled_start_str": self.scheduled_start_dt.strftime("%H:%M:%S") if self.scheduled_start_dt else "-",
+            "scheduled_start_iso": self.scheduled_start_dt.astimezone().isoformat() if self.scheduled_start_dt else None,
             "countdown_start_sec": cd_start,
             "elapsed_sec": elapsed_s,
             "breath": {
@@ -290,6 +319,7 @@ class Operator1Coordinator:
             },
             "error_message": self.error_message,
             "status_note": self.status_note,
+            "last_summary": self.last_summary,
             "hackrf": asdict(self.recorder.stats),
         }
 
@@ -325,6 +355,56 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(BASE_DIR / "templates" / "operator1.html")
+
+
+@app.get("/api/session")
+async def api_session() -> dict[str, Any]:
+    snap = coordinator.build_snapshot()
+    return {
+        "ok": True,
+        "server_now_iso": datetime.now().astimezone().isoformat(),
+        "session_id": snap["session_id"],
+        "state": snap["state"],
+        "scheduled_start_str": snap["scheduled_start_str"],
+        "scheduled_start_iso": snap["scheduled_start_iso"],
+        "countdown_start_sec": snap["countdown_start_sec"],
+        "breath_durations": snap["breath"]["durations"],
+    }
+
+
+@app.get("/api/files")
+async def api_files() -> dict[str, Any]:
+    files = await asyncio.to_thread(list_session_files, LOG_DIR)
+    return {"files": files}
+
+
+@app.get("/api/summary")
+async def api_summary(name: str) -> dict[str, Any]:
+    if not name.endswith("_csi.csv"):
+        raise HTTPException(status_code=400, detail="Ringkasan hanya tersedia untuk file *_csi.csv")
+    try:
+        path = resolve_log_file(LOG_DIR, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    summary = await asyncio.to_thread(summarize_csi_csv, path)
+    if summary is None:
+        raise HTTPException(status_code=422, detail="Format CSV CSI tidak dikenali")
+    return summary.as_dict()
+
+
+@app.get("/api/files/{name}")
+async def api_download(name: str) -> FileResponse:
+    try:
+        path = resolve_log_file(LOG_DIR, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    media_type = "text/csv" if path.suffix == ".csv" else "application/octet-stream"
+    return FileResponse(path, filename=name, media_type=media_type)
 
 
 @app.websocket("/ws")
